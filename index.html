@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="be">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Навагодняя ёлка · Адлік да Новага года</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&subset=cyrillic&display=swap" rel="stylesheet">
+<style>
+  :root { --gold:#f1c75b; --dim:rgba(241,199,91,.55); }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden; background:#050508; color:#f3ead2; font-family:'JetBrains Mono', ui-monospace, monospace; }
+  canvas#scene { display:block; width:100vw; height:100vh; touch-action:none; }
+  .hud { position:fixed; top:22px; left:0; right:0; text-align:center; pointer-events:none; }
+  .hud .label { font-size:12px; letter-spacing:6px; color:var(--dim); }
+  .hud .count { font-weight:700; font-size:40px; letter-spacing:2px; margin-top:8px; color:#fff3d0; text-shadow:0 0 14px rgba(241,199,91,.55); white-space:nowrap; }
+  .hud .count span { color:var(--gold); font-size:20px; margin:0 10px 0 2px; }
+  .hud .now { margin-top:8px; font-size:12px; color:rgba(230,230,255,.5); letter-spacing:2px; }
+  .hud.party .count { color:#fff; text-shadow:0 0 18px #ff8fd1, 0 0 30px #ffd36b; }
+  .controls { position:fixed; left:50%; bottom:44px; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:max-content; max-width:94vw; }
+  .controls button { font-family:inherit; font-size:12px; color:#e9dfc3; background:rgba(10,10,16,.7); border:1px solid rgba(241,199,91,.35); padding:8px 12px; cursor:pointer; }
+  .controls button:hover { border-color:var(--gold); color:var(--gold); }
+  .hint { position:fixed; bottom:16px; left:0; right:0; text-align:center; font-size:11px; color:rgba(220,220,255,.4); }
+  .toast { position:fixed; top:30%; left:50%; transform:translate(-50%,0); font-weight:700; font-size:18px; color:#fff; text-shadow:0 0 10px #f1c75b;
+           opacity:0; transition:opacity .35s, transform .35s; pointer-events:none; }
+  .toast.show { opacity:1; transform:translate(-50%,-10px); }
+  @media (max-width:640px) { .hud .count { font-size:26px; } .hud .count span { font-size:14px; margin:0 6px 0 1px; } .controls button { font-size:11px; padding:7px 9px; } }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div class="hud" id="hud">
+  <div class="label" id="label">ДА НОВАГА ГОДА ЗАСТАЛОСЯ</div>
+  <div class="count" id="count">--</div>
+  <div class="now" id="now"></div>
+</div>
+<div class="controls">
+  <button id="bReplay">↺ Яшчэ раз</button>
+  <button id="bAscii">▦ ASCII: Укл</button>
+  <button id="bLights">✦ Агеньчыкі: Мігценне</button>
+  <button id="bSpin">⟳ Кручэнне: Укл</button>
+  <button id="bParty">✺ Паказаць поўнач</button>
+</div>
+<div class="hint">Цягніце, каб павярнуць · Кола мышы або два пальцы — маштаб · Націсніце на падарунак</div>
+<div class="toast" id="toast"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------------- helpers ----------------
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
+const rand = mulberry32(20270101);
+const pick = a => a[Math.floor(rand()*a.length)];
+const hash2 = (x,z) => { const s=Math.sin(x*127.1+z*311.7)*43758.5453; return s-Math.floor(s); };
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const smooth = v => { v = clamp01(v); return v*v*(3-2*v); };
+const easeOutBack = v => { const c1=1.70158, c3=c1+1; return 1 + c3*Math.pow(v-1,3) + c1*Math.pow(v-1,2); };
+const easeOutBounce = x => { const n=7.5625, d=2.75; if(x<1/d) return n*x*x; if(x<2/d) return n*(x-=1.5/d)*x+.75; if(x<2.5/d) return n*(x-=2.25/d)*x+.9375; return n*(x-=2.625/d)*x+.984375; };
+const tc = new THREE.Color();
+function jitter(hex, amt=0.04){ tc.set(hex); const h={}; tc.getHSL(h); tc.setHSL(h.h,h.s,clamp01(h.l+(rand()-0.5)*amt*2)); return tc.clone(); }
+
+class VoxelSet {
+  constructor(){ this.m=new Map(); }
+  k(x,y,z){ return x+','+y+','+z; }
+  set(x,y,z,c,kind){ const v={x,y,z,c,kind}; this.m.set(this.k(x,y,z),v); return v; }
+  get(x,y,z){ return this.m.get(this.k(x,y,z)); }
+  has(x,y,z){ return this.m.has(this.k(x,y,z)); }
+  exposed(v){ return !this.has(v.x+1,v.y,v.z)||!this.has(v.x-1,v.y,v.z)||!this.has(v.x,v.y+1,v.z)||!this.has(v.x,v.y-1,v.z)||!this.has(v.x,v.y,v.z+1)||!this.has(v.x,v.y,v.z-1); }
+  sideExposed(v){ return !this.has(v.x+1,v.y,v.z)||!this.has(v.x-1,v.y,v.z)||!this.has(v.x,v.y,v.z+1)||!this.has(v.x,v.y,v.z-1); }
+}
+const boxGeo = new THREE.BoxGeometry(1,1,1);
+const solidMat = new THREE.MeshStandardMaterial({ roughness:0.85, metalness:0, flatShading:true });
+function buildMesh(list, material=solidMat, scale=1){
+  const mesh = new THREE.InstancedMesh(boxGeo, material, Math.max(1,list.length));
+  const m=new THREE.Matrix4(), q=new THREE.Quaternion(), s=new THREE.Vector3(scale,scale,scale), p=new THREE.Vector3();
+  list.forEach((v,i)=>{ p.set(v.x,v.y,v.z); m.compose(p,q,s); mesh.setMatrixAt(i,m); mesh.setColorAt(i, v.c instanceof THREE.Color ? v.c : tc.set(v.c)); });
+  mesh.count = list.length; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  return mesh;
+}
+
+// ---------------- renderer / scene ----------------
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050508);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 600);
+const baseCam = new THREE.Vector3(0, 19, 76);
+function fitCamera(){ const a=innerWidth/innerHeight; const f = a<1 ? 1.3+(1-a)*1.5 : 1; camera.position.copy(baseCam).multiplyScalar(f); }
+fitCamera();
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 12.5, 0);
+controls.enableDamping = true; controls.dampingFactor = 0.06;
+controls.autoRotate = true; controls.autoRotateSpeed = 0.45;
+controls.minDistance = 22; controls.maxDistance = 140;
+controls.maxPolarAngle = Math.PI*0.49; controls.enablePan = false;
+
+scene.add(new THREE.HemisphereLight(0xb8c8ff, 0x2a2030, 1.5));
+const moon = new THREE.DirectionalLight(0xfff2dd, 2.4); moon.position.set(-20, 40, 30); scene.add(moon);
+const warm = new THREE.PointLight(0xffb070, 8, 40, 1); warm.position.set(0, 8, 14); scene.add(warm);
+
+// ground: near-black disc so the ASCII pass leaves it mostly empty
+const ground = new THREE.Mesh(new THREE.CircleGeometry(80, 64), new THREE.MeshBasicMaterial({ color:0x000000 }));
+ground.rotation.x = -Math.PI/2; ground.position.y = 0; scene.add(ground);
+
+// stars
+{ const N=900, pos=new Float32Array(N*3);
+  for (let i=0;i<N;i++){ const u=Math.random()*0.95+0.02, t=Math.random()*Math.PI*2, r=220, s=Math.sqrt(1-u*u); pos[i*3]=r*s*Math.cos(t); pos[i*3+1]=r*u; pos[i*3+2]=r*s*Math.sin(t); }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color:0xffffff, size:1.6, sizeAttenuation:false }))); }
+
+// ---------------- the golden clock dial on the ground ----------------
+const DIAL_R = 19;
+const dialCanvas = document.createElement('canvas'); dialCanvas.width = dialCanvas.height = 1024;
+const dctx = dialCanvas.getContext('2d');
+const dialTex = new THREE.CanvasTexture(dialCanvas); dialTex.colorSpace = THREE.SRGBColorSpace; dialTex.anisotropy = 4;
+const dialMat = new THREE.MeshBasicMaterial({ map:dialTex, transparent:true, color:new THREE.Color(1.5,1.4,1.2), depthWrite:false });
+const dial = new THREE.Mesh(new THREE.PlaneGeometry(DIAL_R*2, DIAL_R*2), dialMat);
+dial.rotation.x = -Math.PI/2; dial.position.y = 0.02; scene.add(dial);
+const ROMAN = ['XII','I','II','III','IV','V','VI','VII','VIII','IX','X','XI'];
+let nextYear = new Date().getFullYear()+1;
+function drawDial(now){
+  const c=512, g=dctx; g.clearRect(0,0,1024,1024);
+  g.save(); g.translate(c,c);
+  g.strokeStyle='#e9bf55'; g.fillStyle='#e9bf55';
+  const ring=(r,w)=>{ g.lineWidth=w; g.beginPath(); g.arc(0,0,r,0,Math.PI*2); g.stroke(); };
+  ring(500,10); ring(472,4); ring(318,6); ring(300,2);
+  for (let i=0;i<60;i++){ const a=i/60*Math.PI*2, big=i%5===0; g.lineWidth=big?10:4; const r0=big?430:448;
+    g.beginPath(); g.moveTo(Math.sin(a)*r0,-Math.cos(a)*r0); g.lineTo(Math.sin(a)*470,-Math.cos(a)*470); g.stroke(); }
+  g.font='bold 58px Georgia, serif'; g.textAlign='center'; g.textBaseline='middle';
+  for (let i=0;i<12;i++){ const a=i/12*Math.PI*2; g.save(); g.translate(Math.sin(a)*370,-Math.cos(a)*370); g.fillText(ROMAN[i],0,0); g.restore(); }
+  // arc text around the inner ring
+  const txt = `·  ${nextYear}  ·  АДЛІК ДА НОВАГА ГОДА  ·  ${nextYear}  ·  АДЛІК ДА НОВАГА ГОДА  `;
+  g.font='bold 26px "JetBrains Mono", monospace';
+  for (let i=0;i<txt.length;i++){ const a=i/txt.length*Math.PI*2; g.save(); g.rotate(a); g.translate(0,-272); g.fillText(txt[i],0,0); g.restore(); }
+  // hands (real local time)
+  const h=now.getHours()%12, m=now.getMinutes(), s=now.getSeconds();
+  const hand=(ang,len,w,col)=>{ g.save(); g.rotate(ang); g.strokeStyle=col; g.lineWidth=w; g.lineCap='round'; g.beginPath(); g.moveTo(0,40); g.lineTo(0,-len); g.stroke(); g.restore(); };
+  hand((h+m/60)/12*Math.PI*2, 230, 16, '#f6d27a');
+  hand((m+s/60)/60*Math.PI*2, 330, 10, '#f6d27a');
+  hand(s/60*Math.PI*2, 420, 4, '#ff6b6b');
+  g.restore(); dialTex.needsUpdate = true;
+}
+
+// ---------------- tree (built on a fine grid: RES voxels per world unit) ----------------
+const RES = 3;
+const world = new VoxelSet();
+const lights = [];
+const LEAF = [0x3aa84e,0x46b85a,0x2f9a46,0x55c466,0x2a8a3e,0x62cf6e];
+const TW = Math.floor(1.5*RES);
+for (let y=1;y<=4*RES;y++) for (let x=-TW;x<=TW;x++) for (let z=-TW;z<=TW;z++) world.set(x,y,z,jitter(pick([0x5b3a24,0x6b4429,0x4d311f])),'trunk');
+const tiers = [ {y0:4,h:7,r0:8.6,r1:3.0}, {y0:9,h:7,r0:7.0,r1:2.2}, {y0:14,h:6,r0:5.4,r1:1.4}, {y0:18,h:6,r0:3.8,r1:0.4} ];
+const levelR = {};
+for (const t of tiers){ const H=t.h*RES; for (let i=0;i<H;i++){
+  const y=t.y0*RES+i, r=(t.r0+(t.r1-t.r0)*(i/(H-1)))*RES; levelR[y]=Math.max(levelR[y]||0,r); const ri=Math.ceil(r);
+  for (let x=-ri;x<=ri;x++) for (let z=-ri;z<=ri;z++){
+    const a=Math.atan2(z,x);
+    const d=Math.hypot(x,z) + (hash2(x+y*7,z-y*3)-0.5)*1.4 + Math.sin(a*9 + y*0.35)*0.9;   // ruffled, branchy edge
+    if (d<=r) world.set(x,y,z,jitter(pick(LEAF),0.07),'leaf'); } } }
+for (let y=24*RES; y<=24*RES+1; y++) world.set(0,y,0,jitter(LEAF[0]),'leaf');
+// rainbow garlands that spiral down the tree
+const isLeafSide = v => v && v.kind==='leaf' && !v.skip && world.sideExposed(v);
+for (let s=0;s<3;s++){ let idx=0;
+  for (let yy=22*RES; yy>=5*RES; yy-=0.35){
+    const y=Math.round(yy), r=levelR[y]; if(!r) continue;
+    const ang = (yy/RES)*0.75 + s*2*Math.PI/3;
+    for (let rr=r+1; rr>r-4; rr-=0.5){
+      const px=Math.round(Math.cos(ang)*rr), pz=Math.round(Math.sin(ang)*rr), v=world.get(px,y,pz);
+      if (v && v.skip) break;
+      if (isLeafSide(v)){ v.skip=true; lights.push({x:px,y,z:pz,color:new THREE.Color().setHSL((idx*0.012+s/3)%1,0.95,0.6),phase:rand()*6.28,speed:1.5+rand()*2,strand:idx++,kind:'garland'}); break; }
+    }
+  }
+}
+for (const v of world.m.values()){
+  if (!isLeafSide(v)) continue; const r=rand();
+  if (r<0.018){ v.skip=true; lights.push({x:v.x,y:v.y,z:v.z,color:new THREE.Color(pick([0xff4d5e,0xffc94a,0x4da3ff,0xfff1c9,0xff7ae0])),phase:rand()*6.28,speed:1+rand()*3,strand:Math.floor(rand()*200),kind:'sparkle'}); }
+  else if (r<0.026){ const c=new THREE.Color(pick([0xd62839,0xb4213a,0xf2b632,0xdfe6f0]));   // little 3-voxel baubles
+    for (const dy of [-1,0,1]){ const n=world.get(v.x,v.y+dy,v.z); if (n && n.kind==='leaf' && !n.skip) n.c=c; } }
+}
+const treeList = [...world.m.values()].filter(v=>!v.skip && world.exposed(v)).sort((a,b)=>a.y-b.y);
+const treeGroup = new THREE.Group(); treeGroup.scale.setScalar(1/RES); treeGroup.position.y = -0.5/RES; scene.add(treeGroup);
+const treeMesh = buildMesh(treeList); treeGroup.add(treeMesh);
+const countAtY = []; { let i=0; for (let y=0;y<=26*RES;y++){ while(i<treeList.length && treeList[i].y<=y) i++; countAtY[y]=i; } }
+
+const lightMat = new THREE.MeshBasicMaterial({ toneMapped:false });
+const lightMesh = buildMesh(lights.map(l=>{ const d=Math.hypot(l.x,l.z)||1; return {x:l.x+l.x/d*0.35,y:l.y,z:l.z+l.z/d*0.35,c:l.color}; }), lightMat, 1.2); treeGroup.add(lightMesh);
+
+// star with a cross flare (finely rasterised five-point star)
+const starGroup = new THREE.Group(); starGroup.position.set(0, 25.9, 0); scene.add(starGroup);
+{ const pts=[]; for (let i=0;i<10;i++){ const a=Math.PI/2 + i*Math.PI/5, r = i%2===0 ? 12 : 5; pts.push([Math.cos(a)*r, Math.sin(a)*r]); }
+  const inside=(x,y)=>{ let c=false; for(let i=0,j=pts.length-1;i<pts.length;j=i++){ const [xi,yi]=pts[i],[xj,yj]=pts[j]; if(((yi>y)!==(yj>y)) && (x<(xj-xi)*(y-yi)/(yj-yi)+xi)) c=!c; } return c; };
+  const vox=[]; for (let x=-13;x<=13;x++) for (let y=-12;y<=13;y++) if (inside(x,y)) for (const z of [0,1]) vox.push({x,y,z:z-0.5,c:new THREE.Color(0xffd36b).multiplyScalar(1.8)});
+  const sm = buildMesh(vox, new THREE.MeshBasicMaterial({toneMapped:false})); sm.scale.setScalar(0.14); starGroup.add(sm);
+  const flareMat = new THREE.MeshBasicMaterial({ color:new THREE.Color(0xfff0c0).multiplyScalar(3), toneMapped:false, transparent:true });
+  const f1 = new THREE.Mesh(new THREE.BoxGeometry(5,0.05,0.05), flareMat), f2 = new THREE.Mesh(new THREE.BoxGeometry(0.05,6,0.05), flareMat);
+  starGroup.add(f1, f2); starGroup.userData.flare = [f1,f2]; }
+
+// building ring (sparkly halo that rises as the tree grows)
+const RING_N = 420;
+const ringGeo = new THREE.BufferGeometry(); const ringPos = new Float32Array(RING_N*3), ringCol = new Float32Array(RING_N*3), ringSeed = [];
+for (let i=0;i<RING_N;i++){ ringSeed.push({a:Math.random()*Math.PI*2, r:(Math.random()-0.5)*1.4, y:(Math.random()-0.5)*0.8});
+  const c=new THREE.Color().setHSL(Math.random()<0.6?0.12:Math.random(),0.8,0.75).multiplyScalar(2.5); ringCol.set([c.r,c.g,c.b],i*3); }
+ringGeo.setAttribute('position', new THREE.BufferAttribute(ringPos,3)); ringGeo.setAttribute('color', new THREE.BufferAttribute(ringCol,3));
+const ring = new THREE.Points(ringGeo, new THREE.PointsMaterial({ size:0.3, vertexColors:true, transparent:true, toneMapped:false, depthWrite:false }));
+scene.add(ring);
+
+// ---------------- presents (same fine grid) ----------------
+const presentDefs = [
+  {x0:5, z0:8, w:3,d:3,h:3, c:0xd62839, r:0xffcf5a},
+  {x0:-9,z0:6, w:3,d:3,h:2, c:0x3a7cf0, r:0xf4f8ff},
+  {x0:-3,z0:10,w:2,d:2,h:2, c:0x32c070, r:0xff4d5e},
+  {x0:1, z0:10,w:2,d:2,h:3, c:0xff6fae, r:0xffffff},
+  {x0:-12,z0:-1,w:3,d:3,h:3, c:0xf2b632, r:0xd62839},
+  {x0:-7,z0:-10,w:4,d:3,h:2, c:0x8a4ff0, r:0xffcf5a},
+  {x0:9, z0:-6,w:3,d:3,h:2, c:0x1fc3c3, r:0xf4f8ff},
+];
+const presents = [];
+presentDefs.forEach((p,idx)=>{
+  const vox=[]; const W=p.w*RES, D=p.d*RES, H=p.h*RES, gcx=(W-1)/2, gcz=(D-1)/2;
+  for (let x=0;x<W;x++) for (let z=0;z<D;z++) for (let y=0;y<H;y++){
+    const rib = Math.abs(x-gcx)<=0.6 || Math.abs(z-gcz)<=0.6;
+    vox.push({x,y,z,c: rib ? jitter(p.r,0.02) : jitter(p.c,0.03)}); }
+  const bz=Math.round(gcz), bx=Math.round(gcx);
+  for (const [dx,dy] of [[0,0],[-1,0],[1,0],[-2,1],[2,1],[-3,1],[3,1],[-2,2],[2,2],[-1,1],[1,1]]) vox.push({x:bx+dx,y:H+dy,z:bz,c:jitter(p.r,0.02)});
+  const mesh = buildMesh(vox); mesh.scale.setScalar(1/RES);
+  const ox=p.x0+(p.w-1)/2, oz=p.z0+(p.d-1)/2;
+  mesh.position.set(-(W-1)/(2*RES), 0.5/RES, -(D-1)/(2*RES));
+  const g=new THREE.Group(); g.position.set(ox,0,oz); g.add(mesh); scene.add(g);
+  const pr={group:g,mesh,def:p,hop:-1,idx}; mesh.userData.present=pr; presents.push(pr);
+});
+
+// ---------------- reindeer light sculpture (drawn on stroke by stroke) ----------------
+const DEER = [
+  [[1,9],[8,9]], [[1,6],[8,6]], [[0,8],[1,9]], [[0,8],[1,6]], [[-0.7,9.6],[0,8.6]],
+  [[7,6],[7.6,0]], [[8,6],[8.8,0]], [[1,6],[0.5,0]], [[2.2,6],[2,0]],
+  [[8,9],[10,12]], [[8.6,7.4],[11,11]], [[10,12],[12.6,12]], [[11,11],[12.9,11.1]], [[12.6,12],[12.9,11.1]],
+  [[10.6,12.2],[10,15]], [[10,15],[8.8,16.2]], [[10,15],[10.8,16.8]], [[10.3,13.6],[9.2,14.1]],
+  [[11.3,12.2],[11.8,14.6]], [[11.8,14.6],[12.9,15.7]], [[11.6,13.5],[12.6,13.6]],
+];
+const deerPts = [];
+for (const [[ax,ay],[bx,by]] of DEER){ const L=Math.hypot(bx-ax,by-ay), n=Math.max(2,Math.ceil(L/0.18));
+  for (let i=0;i<=n;i++){ const t=i/n; deerPts.push({x:ax+(bx-ax)*t, y:ay+(by-ay)*t, z:0, c:new THREE.Color(0xfff6e6).multiplyScalar(1.0)}); } }
+const deerMesh = buildMesh(deerPts, new THREE.MeshBasicMaterial({toneMapped:false}), 0.2);
+const deer = new THREE.Group(); deer.add(deerMesh); deer.scale.setScalar(0.5);
+deer.position.set(9.5, 0.1, 3); deer.rotation.y = -0.35; scene.add(deer);
+const deerTotal = deerPts.length;
+
+// ---------------- bursts (confetti + fireworks) ----------------
+const bursts = [];
+function burst(o, colors, opt={}){
+  const N=opt.n||90, pos=new Float32Array(N*3), col=new Float32Array(N*3), vel=[];
+  for (let i=0;i<N;i++){ pos.set([o.x,o.y,o.z],i*3); const c=new THREE.Color(pick(colors)).multiplyScalar(2.6); col.set([c.r,c.g,c.b],i*3);
+    if (opt.sphere){ const v=new THREE.Vector3(Math.random()-0.5,Math.random()-0.5,Math.random()-0.5).normalize().multiplyScalar(opt.speed*(0.7+Math.random()*0.3)); vel.push(v); }
+    else { const a=Math.random()*Math.PI*2, sp=2+Math.random()*6; vel.push(new THREE.Vector3(Math.cos(a)*sp, 6+Math.random()*9, Math.sin(a)*sp)); } }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(pos,3)); g.setAttribute('color',new THREE.BufferAttribute(col,3));
+  const p=new THREE.Points(g,new THREE.PointsMaterial({size:opt.size||0.5,vertexColors:true,transparent:true,toneMapped:false,depthWrite:false}));
+  scene.add(p); bursts.push({p,vel,life:0,max:opt.life||1.8,grav:opt.grav??18});
+}
+
+// ---------------- ASCII post-processing ----------------
+const RAMP = ' .:-=+*o#%@';
+function glyphAtlas(){
+  const S=48, c=document.createElement('canvas'); c.width=S*RAMP.length; c.height=S; const g=c.getContext('2d');
+  g.fillStyle='#000'; g.fillRect(0,0,c.width,c.height); g.fillStyle='#fff'; g.font=`bold ${S*0.86}px "JetBrains Mono", "Courier New", monospace`; g.textAlign='center'; g.textBaseline='middle';
+  [...RAMP].forEach((ch,i)=>g.fillText(ch, i*S+S/2, S/2+2));
+  const t=new THREE.CanvasTexture(c); t.minFilter=THREE.LinearFilter; t.generateMipmaps=false; return t;
+}
+const AsciiShader = {
+  uniforms: { tDiffuse:{value:null}, tGlyphs:{value:glyphAtlas()}, resolution:{value:new THREE.Vector2()}, cell:{value:9}, nGlyphs:{value:RAMP.length} },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse, tGlyphs; uniform vec2 resolution; uniform float cell, nGlyphs; varying vec2 vUv;
+    void main(){
+      vec2 px = vUv*resolution; vec2 id = floor(px/cell);
+      vec3 best = vec3(0.0); float bl = 0.0; vec3 sum = vec3(0.0);
+      for (int i=0;i<3;i++) for (int j=0;j<3;j++){
+        vec2 p = (id + vec2(float(i)+0.5, float(j)+0.5)/3.0)*cell/resolution;
+        vec3 c = texture2D(tDiffuse, p).rgb; sum += c;
+        float l = dot(c, vec3(0.299,0.587,0.114)); if (l > bl){ bl = l; best = c; }
+      }
+      vec3 col = mix(sum/9.0, best, 0.55);
+      float lum = dot(col, vec3(0.299,0.587,0.114));
+      float l = clamp(pow(lum*2.0, 0.55), 0.0, 0.999);
+      float gi = floor(l*nGlyphs);
+      float avg = dot(sum/9.0, vec3(0.299,0.587,0.114));
+      bool isStar = avg < 0.12 && bl > 0.35;           // lone bright speck -> tiny dot
+      if (isStar){ gi = 1.0; l = 0.9; col = vec3(bl); }
+      vec2 f = fract(px/cell);
+      float m = texture2D(tGlyphs, vec2((gi + f.x)/nGlyphs, f.y)).r;
+      float mx = max(col.r, max(col.g, col.b));
+      vec3 hue = mx > 0.0 ? col/mx : vec3(0.0);
+      gl_FragColor = vec4(hue * m * (0.25 + 1.6*l) * min(max(1.0, mx), 1.5), 1.0);
+    }`
+};
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const asciiPass = new ShaderPass(AsciiShader); composer.addPass(asciiPass);
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight), 0.4, 0.35, 0.85); composer.addPass(bloom);
+composer.addPass(new OutputPass());
+function sizeAscii(){ const v=new THREE.Vector2(); renderer.getDrawingBufferSize(v); asciiPass.uniforms.resolution.value.copy(v); asciiPass.uniforms.cell.value = Math.round((innerWidth<640?4:5)*renderer.getPixelRatio()); }
+sizeAscii();
+
+// ---------------- UI ----------------
+const $ = id => document.getElementById(id);
+let lightMode=0; const MODES=['Мігценне','Бягучыя','Роўныя']; let asciiOn=true, party=false, partyUntil=0;
+$('bLights').onclick=()=>{ lightMode=(lightMode+1)%3; $('bLights').textContent='✦ Агеньчыкі: '+MODES[lightMode]; };
+$('bSpin').onclick=()=>{ controls.autoRotate=!controls.autoRotate; $('bSpin').textContent='⟳ Кручэнне: '+(controls.autoRotate?'Укл':'Выкл'); };
+$('bAscii').onclick=()=>{ asciiOn=!asciiOn; asciiPass.enabled=asciiOn; bloom.strength = asciiOn?0.4:0.8; bloom.threshold = asciiOn?0.85:0.9; $('bAscii').textContent='▦ ASCII: '+(asciiOn?'Укл':'Выкл'); };
+$('bReplay').onclick=()=>{ T=0; };
+$('bParty').onclick=()=>{ partyUntil = performance.now()+9000; showToast(`З Новым ${nextYear} годам!`); };
+const toast=$('toast'); let toastT; function showToast(m){ toast.textContent=m; toast.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>toast.classList.remove('show'),2200); }
+const WISHES=['Новы год — новыя пікселі!','Чысты каляндар!','Бенгальскія агні!','Поўначныя прысмакі!','Талісман на шчасце!','Канфеці!','Вялікіх мар у '+nextYear+' годзе!','Мандарыны!'];
+const pad=n=>String(n).padStart(2,'0');
+const BE_DAYS=['НД','ПН','АЎ','СР','ЧЦ','ПТ','СБ'], BE_MONTHS=['СТУДЗЕНЯ','ЛЮТАГА','САКАВІКА','КРАСАВІКА','МАЯ','ЧЭРВЕНЯ','ЛІПЕНЯ','ЖНІЎНЯ','ВЕРАСНЯ','КАСТРЫЧНІКА','ЛІСТАПАДА','СНЕЖНЯ'];
+const fmtDate=d=>`${BE_DAYS[d.getDay()]}, ${d.getDate()} ${BE_MONTHS[d.getMonth()]} · ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+let lastSec=-1;
+function updateClock(now){
+  const s=now.getSeconds(); if (s===lastSec) return; lastSec=s;
+  const isNY = now.getMonth()===0 && now.getDate()===1;
+  nextYear = isNY ? now.getFullYear() : now.getFullYear()+1;
+  party = isNY;
+  if (isNY){ $('label').textContent='НАДЫШОЎ НОВЫ ГОД'; $('count').textContent=`З НОВЫМ ${now.getFullYear()} ГОДАМ!`; $('hud').classList.add('party'); }
+  else {
+    $('hud').classList.remove('party'); $('label').textContent=`ДА НОВАГА ${nextYear} ГОДА ЗАСТАЛОСЯ`;
+    const ms = new Date(nextYear,0,1) - now; const d=Math.floor(ms/864e5), h=Math.floor(ms/36e5)%24, m=Math.floor(ms/6e4)%60, sec=Math.floor(ms/1e3)%60;
+    $('count').innerHTML = `${d}<span>дз</span>${pad(h)}<span>гад</span>${pad(m)}<span>хв</span>${pad(sec)}<span>с</span>`;
+  }
+  $('now').textContent = fmtDate(now);
+  drawDial(now);
+}
+
+const ray=new THREE.Raycaster(), ndc=new THREE.Vector2(), presentMeshes=presents.map(p=>p.mesh);
+function hitPresent(e){ const r=canvas.getBoundingClientRect(); ndc.set(((e.clientX-r.left)/r.width)*2-1, -((e.clientY-r.top)/r.height)*2+1); ray.setFromCamera(ndc,camera); const h=ray.intersectObjects(presentMeshes,false)[0]; return h?h.object.userData.present:null; }
+let down=null;
+canvas.addEventListener('pointerdown',e=>{ down={x:e.clientX,y:e.clientY}; });
+canvas.addEventListener('pointerup',e=>{ if(!down) return; const mv=Math.hypot(e.clientX-down.x,e.clientY-down.y); down=null; if(mv>6) return;
+  const p=hitPresent(e); if (p && p.hop<0 && T>presentStart(p.idx)+1){ p.hop=0; const o=p.group.position.clone(); o.y=p.def.h+1.5; burst(o,[p.def.c,p.def.r,0xffffff,0xffcf5a]); showToast(pick(WISHES)); } });
+let hoverT=0; canvas.addEventListener('pointermove',e=>{ const t=performance.now(); if(t-hoverT<60||e.buttons) return; hoverT=t; canvas.style.cursor=hitPresent(e)?'pointer':'grab'; });
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight); sizeAscii(); });
+
+// ---------------- timeline ----------------
+let T = 0; window.skipIntro = () => { T = 30; };
+const presentStart = i => 8.2 + i*0.3;
+const clock = new THREE.Clock(); const lc = new THREE.Color();
+let fwTimer = 0;
+function frame(){
+  const dt=Math.min(clock.getDelta(),0.05), t=clock.elapsedTime; T+=dt;
+  const now=new Date(); updateClock(now);
+
+  // 1. dial draws in
+  const dp = smooth(T/1.6); dial.scale.setScalar(0.05+0.95*dp); dialMat.opacity = dp;
+  // 2. tree grows bottom-up with a rising halo
+  const buildH = 0.5 + 25*smooth((T-1.2)/5.2);
+  treeMesh.count = countAtY[Math.max(0,Math.min(26*RES,Math.floor(buildH*RES)))];
+  const ringOn = T>1 && T<7.2; ring.visible = ringOn;
+  if (ringOn){ const yy=Math.min(buildH,24.5), rr=((levelR[Math.round(yy*RES)]||1.8*RES)/RES)+1.6, fade=clamp01((T-1)/0.4)*clamp01((7.2-T)/0.6);
+    ring.material.opacity=fade;
+    for (let i=0;i<RING_N;i++){ const s=ringSeed[i], a=s.a+t*2.2; ringPos[i*3]=Math.cos(a)*(rr+s.r); ringPos[i*3+1]=yy+s.y; ringPos[i*3+2]=Math.sin(a)*(rr+s.r); }
+    ringGeo.attributes.position.needsUpdate=true; }
+  // 3. star pops
+  const sp = clamp01((T-6.4)/0.7); starGroup.scale.setScalar(sp<=0?0.0001:easeOutBack(sp)*(1+0.05*Math.sin(t*2.4)));
+  starGroup.rotation.y = t*0.5; const fl=starGroup.userData.flare; fl[0].scale.x = fl[1].scale.y = 0.7+0.3*Math.sin(t*3.1);
+  // 4. lights switch on from the top down
+  const lightLine = 26 - 24*smooth((T-6.8)/1.6);
+  for (let i=0;i<lights.length;i++){
+    const L=lights[i]; const on = clamp01((L.y/RES - lightLine + 1)/2);
+    let b;
+    if (lightMode===0){ const s=0.5+0.5*Math.sin(t*L.speed+L.phase); b=0.35+1.25*s*s; }
+    else if (lightMode===1){ const f=((L.strand*0.02 - t*0.8)%1+1)%1; b = f<0.35?1.5:0.3; }
+    else b=1.1;
+    if (party) b *= 1 + 0.6*Math.sin(t*8 + L.strand);
+    lightMesh.setColorAt(i, lc.copy(L.color).multiplyScalar(b*on));
+  }
+  lightMesh.instanceColor.needsUpdate=true;
+  // 5. presents drop in
+  for (const p of presents){
+    if (p.hop>=0){ p.hop+=dt/0.9; const k=Math.min(p.hop,1); p.group.position.y=Math.sin(Math.PI*k)*3.2; p.group.rotation.y=k*Math.PI*2; if(p.hop>=1){p.hop=-1;p.group.position.y=0;p.group.rotation.y=0;} continue; }
+    const k = clamp01((T-presentStart(p.idx))/0.9); p.group.visible = k>0; p.group.position.y = 22*(1-easeOutBounce(k));
+  }
+  // 6. reindeer is traced in light
+  deerMesh.count = Math.floor(deerTotal*clamp01((T-10.4)/1.8));
+
+  // fireworks at midnight (or preview)
+  if (party || performance.now()<partyUntil){ fwTimer-=dt; if (fwTimer<=0){ fwTimer=0.35+Math.random()*0.4;
+    burst(new THREE.Vector3((Math.random()-0.5)*50, 30+Math.random()*16, (Math.random()-0.5)*20-6), [pick([0xff4d5e,0xffd36b,0x4da3ff,0x7dff9a,0xff7ae0,0xffffff]), pick([0xffd36b,0xffffff])], {n:150,sphere:true,speed:11,grav:5,life:2.2,size:0.7}); } }
+  for (let i=bursts.length-1;i>=0;i--){ const B=bursts[i]; B.life+=dt; const pos=B.p.geometry.attributes.position.array;
+    for (let j=0;j<B.vel.length;j++){ const v=B.vel[j]; v.y-=B.grav*dt; v.multiplyScalar(0.985); pos[j*3]+=v.x*dt; pos[j*3+1]+=v.y*dt; pos[j*3+2]+=v.z*dt; }
+    B.p.geometry.attributes.position.needsUpdate=true; B.p.material.opacity=Math.max(0,1-B.life/B.max);
+    if (B.life>B.max){ scene.remove(B.p); B.p.geometry.dispose(); B.p.material.dispose(); bursts.splice(i,1); } }
+
+  controls.update(); composer.render(); requestAnimationFrame(frame);
+}
+updateClock(new Date());
+frame();
+</script>
+</body>
+</html>
