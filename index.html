@@ -112,8 +112,8 @@ controls.autoRotate = true; controls.autoRotateSpeed = 0.45;
 controls.minDistance = 22; controls.maxDistance = 140;
 controls.maxPolarAngle = Math.PI*0.49; controls.enablePan = false;
 
-scene.add(new THREE.HemisphereLight(0xb8c8ff, 0x2a2030, 1.5));
-const moon = new THREE.DirectionalLight(0xfff2dd, 2.4); moon.position.set(-20, 40, 30); scene.add(moon);
+scene.add(new THREE.HemisphereLight(0xb8c8ff, 0x2a2030, 0.9));
+const moon = new THREE.DirectionalLight(0xfff2dd, 1.9); moon.position.set(-20, 40, 30); scene.add(moon);
 const warm = new THREE.PointLight(0xffb070, 8, 40, 1); warm.position.set(0, 8, 14); scene.add(warm);
 
 // ground: near-black disc so the ASCII pass leaves it mostly empty
@@ -159,57 +159,93 @@ function drawDial(now){
   g.restore(); dialTex.needsUpdate = true;
 }
 
-// ---------------- tree (built on a fine grid: RES voxels per world unit) ----------------
-const RES = 3;
-const world = new VoxelSet();
+// ---------------- tree (fine grid: RES voxels per world unit) ----------------
+// Eight drooping branch layers; each layer has branch lobes that twist round the trunk,
+// tips that sag, needle-level noise and light-to-dark shading from tip to core.
+const RES = 5;
 const lights = [];
-const LEAF = [0x3aa84e,0x46b85a,0x2f9a46,0x55c466,0x2a8a3e,0x62cf6e];
-const TW = Math.floor(1.5*RES);
-for (let y=1;y<=4*RES;y++) for (let x=-TW;x<=TW;x++) for (let z=-TW;z<=TW;z++) world.set(x,y,z,jitter(pick([0x5b3a24,0x6b4429,0x4d311f])),'trunk');
-const tiers = [ {y0:4,h:7,r0:8.6,r1:3.0}, {y0:9,h:7,r0:7.0,r1:2.2}, {y0:14,h:6,r0:5.4,r1:1.4}, {y0:18,h:6,r0:3.8,r1:0.4} ];
+const hash3 = (x,y,z) => { const s=Math.sin(x*12.9898+y*78.233+z*37.719)*43758.5453; return s-Math.floor(s); };
+const TIERS = [];
+for (let i=0;i<8;i++){ const yb=3.2+i*2.45; TIERS.push({ yb, yt:yb+4.8, R:9.6*(1-i/8.8)+0.5, k:7+(i%3)*2, tw:i*0.9, droop:0.9*(1-i/9)+0.2 }); }
+const TOP = 25.2;
+const RMAX = 10.5, OFF = Math.ceil(RMAX*RES)+1, NX = 2*OFF+1, NY = Math.ceil(27*RES);
+const occ = new Uint8Array(NX*NY*NX), edge = new Float32Array(NX*NY*NX);
+const gi = (x,y,z) => (y*NX + (z+OFF))*NX + (x+OFF);
+const get = (x,y,z) => (y<0||y>=NY||x<-OFF||x>OFF||z<-OFF||z>OFF) ? 0 : occ[gi(x,y,z)];
 const levelR = {};
-for (const t of tiers){ const H=t.h*RES; for (let i=0;i<H;i++){
-  const y=t.y0*RES+i, r=(t.r0+(t.r1-t.r0)*(i/(H-1)))*RES; levelR[y]=Math.max(levelR[y]||0,r); const ri=Math.ceil(r);
-  for (let x=-ri;x<=ri;x++) for (let z=-ri;z<=ri;z++){
-    const a=Math.atan2(z,x);
-    const d=Math.hypot(x,z) + (hash2(x+y*7,z-y*3)-0.5)*1.4 + Math.sin(a*9 + y*0.35)*0.9;   // ruffled, branchy edge
-    if (d<=r) world.set(x,y,z,jitter(pick(LEAF),0.07),'leaf'); } } }
-for (let y=24*RES; y<=24*RES+1; y++) world.set(0,y,0,jitter(LEAF[0]),'leaf');
-// rainbow garlands that spiral down the tree
-const isLeafSide = v => v && v.kind==='leaf' && !v.skip && world.sideExposed(v);
-for (let s=0;s<3;s++){ let idx=0;
-  for (let yy=22*RES; yy>=5*RES; yy-=0.35){
-    const y=Math.round(yy), r=levelR[y]; if(!r) continue;
-    const ang = (yy/RES)*0.75 + s*2*Math.PI/3;
-    for (let rr=r+1; rr>r-4; rr-=0.5){
-      const px=Math.round(Math.cos(ang)*rr), pz=Math.round(Math.sin(ang)*rr), v=world.get(px,y,pz);
-      if (v && v.skip) break;
-      if (isLeafSide(v)){ v.skip=true; lights.push({x:px,y,z:pz,color:new THREE.Color().setHSL((idx*0.012+s/3)%1,0.95,0.6),phase:rand()*6.28,speed:1.5+rand()*2,strand:idx++,kind:'garland'}); break; }
-    }
+// trunk
+const TR = 1.2*RES;
+for (let y=1;y<=6*RES;y++) for (let x=-Math.ceil(TR);x<=Math.ceil(TR);x++) for (let z=-Math.ceil(TR);z<=Math.ceil(TR);z++)
+  if (Math.hypot(x,z) <= TR + (hash3(x,y,z)-0.5)*0.8) occ[gi(x,y,z)] = 2;
+// branch layers
+for (const t of TIERS){
+  const y0 = Math.floor((t.yb - t.droop - 0.3)*RES), y1 = Math.ceil(t.yt*RES), rr = Math.ceil(t.R*RES);
+  for (let gy=Math.max(1,y0); gy<=y1; gy++){ const y = gy/RES;
+    for (let x=-rr;x<=rr;x++) for (let z=-rr;z<=rr;z++){
+      const dg = Math.hypot(x,z); if (dg > rr) continue;
+      const d = dg/RES, a = Math.atan2(z,x);
+      const lobe = Math.pow(0.5+0.5*Math.cos(t.k*a + t.tw + y*0.18), 1.5);
+      const ybe = t.yb - t.droop*lobe*(d/t.R);
+      if (y < ybe || y > t.yt) continue;
+      const f = (t.yt - y)/(t.yt - ybe);
+      const rEnv = t.R*Math.pow(f,0.9)*(0.7+0.3*lobe);
+      const n = (hash3(x,gy,z)-0.5)*0.45 + (hash3(x>>1,gy>>1,z>>1)-0.5)*0.35;   // needle clumps
+      if (d + n <= rEnv){ const k=gi(x,gy,z); occ[k]=1; edge[k]=Math.max(edge[k], d/Math.max(rEnv,0.01)); levelR[gy]=Math.max(levelR[gy]||0, dg); }
+    } }
+}
+// tip
+for (let gy=Math.floor(22*RES); gy<=TOP*RES; gy++){ const r=Math.max(0.6, 0.55*(TOP-gy/RES))*RES*0.5; const ri=Math.ceil(r);
+  for (let x=-ri;x<=ri;x++) for (let z=-ri;z<=ri;z++) if (Math.hypot(x,z)<=r){ const k=gi(x,gy,z); if(!occ[k]){ occ[k]=1; edge[k]=Math.hypot(x,z)/Math.max(r,0.5); } } }
+const exposed = (x,y,z) => !get(x+1,y,z)||!get(x-1,y,z)||!get(x,y+1,z)||!get(x,y-1,z)||!get(x,y,z+1)||!get(x,y,z-1);
+// garlands: three rainbow strands spiralling down the outer surface
+const lightAt = new Set();
+for (let s=0;s<3;s++){ let n=0;
+  for (let yy=23.2; yy>=3.6; yy-=0.055){
+    const gy=Math.round(yy*RES), ang=yy*0.72 + s*2*Math.PI/3, ca=Math.cos(ang), sa=Math.sin(ang);
+    for (let r=OFF; r>=0; r--){ const x=Math.round(ca*r), z=Math.round(sa*r);
+      if (get(x,gy,z)===1){ const k=gi(x,gy,z); if(!lightAt.has(k)){ lightAt.add(k); lights.push({x,y:gy,z,color:new THREE.Color().setHSL((n*0.006+s/3)%1,0.95,0.6),phase:rand()*6.28,speed:1.5+rand()*2,strand:n++,kind:'garland'}); } break; } } }
+}
+// colour every visible needle voxel; sprinkle fairy lights and pick ornament spots
+const DARK=new THREE.Color(0x072a12), MID=new THREE.Color(0x167a30), TIP=new THREE.Color(0x52d05a), FROST=new THREE.Color(0xe6f0ff);
+const treeList = [], ornSpots = [];
+for (let gy=0; gy<NY; gy++) for (let z=-OFF; z<=OFF; z++) for (let x=-OFF; x<=OFF; x++){
+  const k=gi(x,gy,z), o=occ[k]; if (!o || lightAt.has(k) || !exposed(x,gy,z)) continue;
+  const h=hash3(x,gy,z);
+  if (o===2){ treeList.push({x,y:gy,z,c:jitter(pick([0x5b3a24,0x6b4429,0x4d311f,0x3f2818]),0.05)}); continue; }
+  const e=edge[k], c=new THREE.Color();
+  if (e<0.75) c.copy(DARK).lerp(MID, e/0.75); else c.copy(MID).lerp(TIP, Math.min(1,(e-0.75)/0.25)*0.85);
+  if (h<0.09) c.lerp(TIP,0.5);                                   // needle highlights
+  if (get(x,gy+1,z) && !get(x,gy-1,z)) c.multiplyScalar(0.55);   // branch undersides
+  if (!get(x,gy+1,z) && e>0.9 && h>0.93) c.copy(FROST);          // a little frost on the tips
+  treeList.push({x,y:gy,z,c});
+  if (e>0.86 && gy>4*RES){ const r=rand();
+    if (r<0.004){ lightAt.add(k); treeList.pop(); lights.push({x,y:gy,z,color:new THREE.Color(pick([0xff4d5e,0xffc94a,0x4da3ff,0xfff1c9,0xff7ae0])),phase:rand()*6.28,speed:1+rand()*3,strand:Math.floor(rand()*400),kind:'sparkle'}); }
+    else if (r<0.0062) ornSpots.push({x,y:gy,z});
   }
 }
-for (const v of world.m.values()){
-  if (!isLeafSide(v)) continue; const r=rand();
-  if (r<0.018){ v.skip=true; lights.push({x:v.x,y:v.y,z:v.z,color:new THREE.Color(pick([0xff4d5e,0xffc94a,0x4da3ff,0xfff1c9,0xff7ae0])),phase:rand()*6.28,speed:1+rand()*3,strand:Math.floor(rand()*200),kind:'sparkle'}); }
-  else if (r<0.026){ const c=new THREE.Color(pick([0xd62839,0xb4213a,0xf2b632,0xdfe6f0]));   // little 3-voxel baubles
-    for (const dy of [-1,0,1]){ const n=world.get(v.x,v.y+dy,v.z); if (n && n.kind==='leaf' && !n.skip) n.c=c; } }
-}
-const treeList = [...world.m.values()].filter(v=>!v.skip && world.exposed(v)).sort((a,b)=>a.y-b.y);
+// round baubles with a highlight
+const ORN=[0xd62839,0xf2b632,0xcfd8e3,0x2f6fd8,0xb4213a,0xe0559a];
+for (const s of ornSpots){ const d=Math.hypot(s.x,s.z)||1, cx=s.x+s.x/d*1.6, cz=s.z+s.z/d*1.6, cy=s.y-1, R=1.9, base=new THREE.Color(pick(ORN));
+  for (let x=-2;x<=2;x++) for (let y=-2;y<=2;y++) for (let z=-2;z<=2;z++){ const dd=Math.hypot(x,y,z); if (dd>R) continue;
+    const c=base.clone(); if (y>=1 && x<=0) c.lerp(new THREE.Color(0xffffff),0.45); if (y<=-1) c.multiplyScalar(0.7);
+    treeList.push({x:Math.round(cx+x),y:cy+y,z:Math.round(cz+z),c}); }
+  treeList.push({x:Math.round(cx),y:cy+2,z:Math.round(cz),c:new THREE.Color(0xd9b35a)}); }
+treeList.sort((a,b)=>a.y-b.y);
 const treeGroup = new THREE.Group(); treeGroup.scale.setScalar(1/RES); treeGroup.position.y = -0.5/RES; scene.add(treeGroup);
 const treeMesh = buildMesh(treeList); treeGroup.add(treeMesh);
-const countAtY = []; { let i=0; for (let y=0;y<=26*RES;y++){ while(i<treeList.length && treeList[i].y<=y) i++; countAtY[y]=i; } }
+const countAtY = []; { let i=0; for (let y=0;y<=27*RES;y++){ while(i<treeList.length && treeList[i].y<=y) i++; countAtY[y]=i; } }
 
 const lightMat = new THREE.MeshBasicMaterial({ toneMapped:false });
-const lightMesh = buildMesh(lights.map(l=>{ const d=Math.hypot(l.x,l.z)||1; return {x:l.x+l.x/d*0.35,y:l.y,z:l.z+l.z/d*0.35,c:l.color}; }), lightMat, 1.2); treeGroup.add(lightMesh);
+const lightMesh = buildMesh(lights.map(l=>{ const d=Math.hypot(l.x,l.z)||1; return {x:l.x+l.x/d*0.5,y:l.y,z:l.z+l.z/d*0.5,c:l.color}; }), lightMat, 1.5); treeGroup.add(lightMesh);
 
 // star with a cross flare (finely rasterised five-point star)
-const starGroup = new THREE.Group(); starGroup.position.set(0, 25.9, 0); scene.add(starGroup);
+const starGroup = new THREE.Group(); starGroup.position.set(0, 26.6, 0); scene.add(starGroup);
 { const pts=[]; for (let i=0;i<10;i++){ const a=Math.PI/2 + i*Math.PI/5, r = i%2===0 ? 12 : 5; pts.push([Math.cos(a)*r, Math.sin(a)*r]); }
   const inside=(x,y)=>{ let c=false; for(let i=0,j=pts.length-1;i<pts.length;j=i++){ const [xi,yi]=pts[i],[xj,yj]=pts[j]; if(((yi>y)!==(yj>y)) && (x<(xj-xi)*(y-yi)/(yj-yi)+xi)) c=!c; } return c; };
   const vox=[]; for (let x=-13;x<=13;x++) for (let y=-12;y<=13;y++) if (inside(x,y)) for (const z of [0,1]) vox.push({x,y,z:z-0.5,c:new THREE.Color(0xffd36b).multiplyScalar(1.8)});
   const sm = buildMesh(vox, new THREE.MeshBasicMaterial({toneMapped:false})); sm.scale.setScalar(0.14); starGroup.add(sm);
   const flareMat = new THREE.MeshBasicMaterial({ color:new THREE.Color(0xfff0c0).multiplyScalar(3), toneMapped:false, transparent:true });
-  const f1 = new THREE.Mesh(new THREE.BoxGeometry(5,0.05,0.05), flareMat), f2 = new THREE.Mesh(new THREE.BoxGeometry(0.05,6,0.05), flareMat);
+  const f1 = new THREE.Mesh(new THREE.BoxGeometry(4,0.05,0.05), flareMat), f2 = new THREE.Mesh(new THREE.BoxGeometry(0.05,3.2,0.05), flareMat);
   starGroup.add(f1, f2); starGroup.userData.flare = [f1,f2]; }
 
 // building ring (sparkly halo that rises as the tree grows)
@@ -234,7 +270,7 @@ const presentDefs = [
 const presents = [];
 presentDefs.forEach((p,idx)=>{
   const vox=[]; const W=p.w*RES, D=p.d*RES, H=p.h*RES, gcx=(W-1)/2, gcz=(D-1)/2;
-  for (let x=0;x<W;x++) for (let z=0;z<D;z++) for (let y=0;y<H;y++){
+  for (let x=0;x<W;x++) for (let z=0;z<D;z++) for (let y=0;y<H;y++){ if (x>0&&x<W-1&&y>0&&y<H-1&&z>0&&z<D-1) continue;
     const rib = Math.abs(x-gcx)<=0.6 || Math.abs(z-gcz)<=0.6;
     vox.push({x,y,z,c: rib ? jitter(p.r,0.02) : jitter(p.c,0.03)}); }
   const bz=Math.round(gcz), bx=Math.round(gcx);
@@ -314,7 +350,7 @@ composer.addPass(new RenderPass(scene, camera));
 const asciiPass = new ShaderPass(AsciiShader); composer.addPass(asciiPass);
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight), 0.4, 0.35, 0.85); composer.addPass(bloom);
 composer.addPass(new OutputPass());
-function sizeAscii(){ const v=new THREE.Vector2(); renderer.getDrawingBufferSize(v); asciiPass.uniforms.resolution.value.copy(v); asciiPass.uniforms.cell.value = Math.round((innerWidth<640?4:5)*renderer.getPixelRatio()); }
+function sizeAscii(){ const v=new THREE.Vector2(); renderer.getDrawingBufferSize(v); asciiPass.uniforms.resolution.value.copy(v); asciiPass.uniforms.cell.value = Math.max(5, Math.round((innerWidth<640?3:4)*renderer.getPixelRatio())); }
 sizeAscii();
 
 // ---------------- UI ----------------
@@ -368,7 +404,7 @@ function frame(){
   const dp = smooth(T/1.6); dial.scale.setScalar(0.05+0.95*dp); dialMat.opacity = dp;
   // 2. tree grows bottom-up with a rising halo
   const buildH = 0.5 + 25*smooth((T-1.2)/5.2);
-  treeMesh.count = countAtY[Math.max(0,Math.min(26*RES,Math.floor(buildH*RES)))];
+  treeMesh.count = countAtY[Math.max(0,Math.min(27*RES,Math.floor(buildH*RES)))];
   const ringOn = T>1 && T<7.2; ring.visible = ringOn;
   if (ringOn){ const yy=Math.min(buildH,24.5), rr=((levelR[Math.round(yy*RES)]||1.8*RES)/RES)+1.6, fade=clamp01((T-1)/0.4)*clamp01((7.2-T)/0.6);
     ring.material.opacity=fade;
@@ -383,7 +419,7 @@ function frame(){
     const L=lights[i]; const on = clamp01((L.y/RES - lightLine + 1)/2);
     let b;
     if (lightMode===0){ const s=0.5+0.5*Math.sin(t*L.speed+L.phase); b=0.35+1.25*s*s; }
-    else if (lightMode===1){ const f=((L.strand*0.02 - t*0.8)%1+1)%1; b = f<0.35?1.5:0.3; }
+    else if (lightMode===1){ const f=((L.strand*0.008 - t*0.8)%1+1)%1; b = f<0.35?1.5:0.3; }
     else b=1.1;
     if (party) b *= 1 + 0.6*Math.sin(t*8 + L.strand);
     lightMesh.setColorAt(i, lc.copy(L.color).multiplyScalar(b*on));
